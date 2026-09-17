@@ -13,9 +13,10 @@ OpenAI's, anything that speaks the same shape (OpenRouter, a server on your
 own machine), or a command of your own.
 
 The board fills the window, and every piece carries its letter under it:
-capitals for White, small letters for Black. The pieces each side has
-taken stand beside the board, with the point lead next to whoever is
-ahead. The header names the model
+capitals for White, small letters for Black.
+
+The pieces each side has taken stand beside the board, with the point lead
+next to whoever is ahead. The header names the model
 that actually answered, and the panel keeps the running cost when the
 opponent reports one.
 
