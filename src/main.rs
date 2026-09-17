@@ -7,6 +7,7 @@
 
 mod chess;
 mod config;
+mod lichess;
 mod opponent;
 
 use std::sync::mpsc::{channel, Receiver};
@@ -15,7 +16,7 @@ use std::time::Instant;
 use chess::{Color, Move, Over, Piece, Position, Square};
 use config::Config;
 use crust::cursor::Cursor;
-use crust::{style, Crust, Input, Pane};
+use crust::{style, Crust, Input, Pane, Popup};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SIDE_W: u16 = 34;
@@ -50,6 +51,18 @@ mod t {
     pub const BAR: u8 = 236;
 }
 
+/// A game on lichess: which one, who is on the other side, and the clocks
+/// as they last stood.
+struct Live {
+    id: String,
+    opponent: String,
+    events: Receiver<lichess::Event>,
+    /// Seconds left for White and for Black, and when that was said.
+    clocks: (u64, u64),
+    since: Instant,
+    ended: bool,
+}
+
 /// A game in progress, and everything drawn about it.
 struct App {
     cfg: Config,
@@ -70,6 +83,10 @@ struct App {
     /// The model that answered last, and what the game has cost so far.
     played_by: Option<String>,
     spent: f64,
+    /// A game on lichess, when one is on.
+    live: Option<Live>,
+    /// The account's own event stream, which says when a game starts.
+    lichess_events: Option<Receiver<lichess::Event>>,
     flip: bool,
     header: Pane,
     board_p: Pane,
@@ -89,7 +106,7 @@ impl App {
         let mut app = App {
             cfg, pos: Position::start(), seen: Vec::new(), played: Vec::new(), back: Vec::new(),
             me, cursor: 4, picked: None, last: None, over: None, thinking: None, note: None,
-            played_by: None, spent: 0.0,
+            played_by: None, spent: 0.0, live: None, lichess_events: None,
             flip: me == Color::Black,
             header: Pane::new(1, 1, cols, 1, t::FG as u16, t::BAR as u16),
             board_p: Pane::new(1, 2, cols.saturating_sub(SIDE_W), rows.saturating_sub(2), t::FG as u16, 0),
@@ -127,9 +144,10 @@ impl App {
         let left = format!(" {}  {}",
             style::bold(&style::fg("gambit", t::ACCENT)),
             style::fg(&format!("you play {you}"), t::DIM));
-        let who = match &self.played_by {
-            Some(id) => format!("{} · {}", opponent::describe(&self.cfg), opponent::pretty_model(id)),
-            None => opponent::describe(&self.cfg),
+        let who = match (&self.live, &self.played_by) {
+            (Some(live), _) => format!("lichess · {}", live.opponent),
+            (None, Some(id)) => format!("{} · {}", opponent::describe(&self.cfg), opponent::pretty_model(id)),
+            (None, None) => opponent::describe(&self.cfg),
         };
         let right = format!("{}  v{} ", style::fg(&who, t::OK), VERSION);
         let pad = (self.cols as usize).saturating_sub(crust::display_width(&left) + crust::display_width(&right));
@@ -140,14 +158,18 @@ impl App {
     /// left and the file letters underneath.
     fn board_text(&self) -> String {
         let (sq_w, sq_h) = self.sq;
-        let (mid_col, mid_row) = (sq_w / 2, sq_h / 2);
+        let mid_col = sq_w / 2;
+        // The piece sits a row above the middle, so it has a line of its own
+        // square under it rather than resting on the edge.
+        let piece_row = (sq_h / 2).saturating_sub(1);
+        let letter_row = piece_row + 1;
         let mut lines: Vec<String> = vec![String::new()];
         let check = self.pos.in_check(self.pos.turn);
         for row in 0..8 {
             let rank = if self.flip { row } else { 7 - row };
             for sub in 0..sq_h {
                 let mut line = String::from("  ");
-                let label = if sub == mid_row { format!("{} ", rank + 1) } else { "  ".to_string() };
+                let label = if sub == piece_row { format!("{} ", rank + 1) } else { "  ".to_string() };
                 line.push_str(&style::fg(&label, t::DIM));
                 for col in 0..8 {
                     let file = if self.flip { 7 - col } else { col };
@@ -168,12 +190,13 @@ impl App {
                     // The glyph on the middle row, its letter below when the
                     // square is tall enough: knight, bishop and pawn are hard
                     // to tell apart at this size otherwise.
-                    let mark = match (here, sq_h >= 3 && sub == mid_row + 1) {
-                        (Some((c, p)), false) => piece_glyph(p, c).to_string(),
-                        (Some((c, p)), true) => piece_letter(p, c).to_string(),
-                        (None, _) => String::new(),
+                    let letters = sq_h >= 3;
+                    let mark = match here {
+                        Some((c, p)) if sub == piece_row => piece_glyph(p, c).to_string(),
+                        Some((c, p)) if letters && sub == letter_row => piece_letter(p, c).to_string(),
+                        _ => String::new(),
                     };
-                    let cell = if mark.is_empty() || (sub != mid_row && !(sq_h >= 3 && sub == mid_row + 1)) {
+                    let cell = if mark.is_empty() {
                         " ".repeat(sq_w)
                     } else {
                         let after = sq_w.saturating_sub(mid_col + crust::display_width(&mark));
@@ -218,6 +241,23 @@ impl App {
             let cut = l.len() - room;
             l.drain(3..3 + cut);
         }
+        if let Some(live) = &self.live {
+            let gone = live.since.elapsed().as_secs();
+            let (w, b) = live.clocks;
+            let (w, b) = if live.ended {
+                (w, b)
+            } else if self.pos.turn == Color::White {
+                (w.saturating_sub(gone), b)
+            } else {
+                (w, b.saturating_sub(gone))
+            };
+            let mine = if self.me == Color::White { w } else { b };
+            let theirs = if self.me == Color::White { b } else { w };
+            l.push(String::new());
+            l.push(format!(" {}   {}",
+                style::fg(&format!("you {}", lichess::clock(mine)), t::OK),
+                style::fg(&format!("{} {}", live.opponent, lichess::clock(theirs)), t::DIM)));
+        }
         l.push(String::new());
         l.push(format!(" {}", self.status()));
         if self.spent > 0.0 {
@@ -244,13 +284,23 @@ impl App {
     }
 
     fn footer_text(&self) -> String {
-        style::fg(" arrows move  ENTER pick and place  / type a move  u back  n new  f flip  o opponent  ? help  q quit ", t::DIM)
+        style::fg(" arrows move  ENTER pick and place  / type a move  u back  n new  c sides  f flip  o opponent  L lichess  ? help  q quit ", t::DIM)
     }
 
     // ---- Playing ------------------------------------------------------
 
-    /// Take the move if it is legal, then let the opponent think.
+    /// Take the move if it is legal, then let the opponent think. In a
+    /// lichess game the move goes there, and the answer comes back on the
+    /// game's stream.
     fn play(&mut self, mv: Move) {
+        if let Some(live) = &self.live {
+            if live.ended { return; }
+            if let Err(why) = lichess::send_move(&self.cfg, &live.id, &mv.uci()) {
+                self.note = Some((format!("lichess would not take {}: {why}", self.pos.san(mv)), t::ERR));
+                self.picked = None;
+                return;
+            }
+        }
         let san = self.pos.san(mv);
         self.back.push(self.pos.clone());
         self.pos = self.pos.after(mv);
@@ -260,7 +310,7 @@ impl App {
         self.picked = None;
         self.over = self.pos.over(&self.seen);
         self.note = None;
-        if self.over.is_none() && self.pos.turn != self.me { self.start_thinking(None); }
+        if self.live.is_none() && self.over.is_none() && self.pos.turn != self.me { self.start_thinking(None); }
     }
 
     /// Ask the opponent, on a thread of its own.
@@ -311,9 +361,10 @@ impl App {
         self.play(mv);
     }
 
-    /// Take back your move and the answer to it.
+    /// Take back your move and the answer to it. Not on lichess: a move
+    /// played there is played.
     fn undo(&mut self) {
-        if self.thinking.is_some() { return; }
+        if self.thinking.is_some() || self.live.is_some() { return; }
         for _ in 0..2 {
             let Some(prev) = self.back.pop() else { break };
             self.pos = prev;
@@ -325,6 +376,14 @@ impl App {
         self.picked = None;
         self.over = None;
         self.note = None;
+    }
+
+    /// Play the other colour from now on, and start again.
+    fn change_sides(&mut self) {
+        self.cfg.side = if self.me == Color::White { "black".into() } else { "white".into() };
+        let _ = config::save(&self.cfg);
+        self.new_game();
+        self.note = Some((format!("You play {} now.", self.cfg.side.trim()), t::OK));
     }
 
     fn new_game(&mut self) {
@@ -339,7 +398,8 @@ impl App {
         self.me = if self.cfg.side.trim().eq_ignore_ascii_case("black") { Color::Black } else { Color::White };
         self.flip = self.me == Color::Black;
         self.cursor = if self.me == Color::White { 4 } else { 60 };
-        if self.pos.turn != self.me { self.start_thinking(None); }
+        // On lichess the other side is a person or their own engine.
+        if self.live.is_none() && self.pos.turn != self.me { self.start_thinking(None); }
     }
 
     // ---- Keys ---------------------------------------------------------
@@ -358,6 +418,9 @@ impl App {
             "u" => self.undo(),
             "n" => self.new_game(),
             "f" => self.flip = !self.flip,
+            "c" => self.change_sides(),
+            "L" => self.lichess_menu(),
+            "R" => self.resign(),
             "o" => self.choose_opponent(),
             "s" => self.save_pgn(),
             "?" => self.help(),
@@ -425,25 +488,255 @@ impl App {
         }
     }
 
+    /// Pick who answers, and which model, from a menu.
     fn choose_opponent(&mut self) {
-        let kind = self.footer.ask(" opponent (claude / anthropic / openai / command): ", &self.cfg.opponent);
-        Cursor::hide();
-        let kind = kind.trim().to_string();
-        if kind.is_empty() { return; }
-        self.cfg.opponent = kind;
-        let model = self.footer.ask(" model (empty = the tool's own default): ", &self.cfg.model);
-        Cursor::hide();
-        self.cfg.model = model.trim().to_string();
-        if self.cfg.opponent == "command" {
-            let cmd = self.footer.ask(" command: ", &self.cfg.command);
-            Cursor::hide();
-            self.cfg.command = cmd.trim().to_string();
+        const KINDS: [(&str, &str); 4] = [
+            ("claude", "claude -p, the command. No key needed"),
+            ("anthropic", "Anthropic's API. Needs a key"),
+            ("openai", "OpenAI, OpenRouter, your own server. Needs a key"),
+            ("command", "a command of your own"),
+        ];
+        let lines: Vec<String> = KINDS.iter()
+            .map(|(k, what)| format!(" {:<10} {}", k, style::fg(what, t::DIM)))
+            .collect();
+        let mut menu = self.popup(58, lines.len() as u16);
+        menu.pane.index = KINDS.iter().position(|(k, _)| *k == self.cfg.opponent.trim()).unwrap_or(0);
+        let picked = menu.modal(&lines.join("\n"));
+        menu.dismiss(&mut [&mut self.header, &mut self.board_p, &mut self.side_p, &mut self.footer]);
+        self.shown = Default::default();
+        let Some(i) = picked else { return };
+        self.cfg.opponent = KINDS[i].0.to_string();
+        match KINDS[i].0 {
+            "claude" => self.choose_claude_model(),
+            "command" => {
+                let cmd = self.footer.ask(" command: ", &self.cfg.command);
+                Cursor::hide();
+                self.cfg.command = cmd.trim().to_string();
+            }
+            _ => {
+                let model = self.footer.ask(" model (empty = the usual one): ", &self.cfg.model);
+                Cursor::hide();
+                self.cfg.model = model.trim().to_string();
+            }
         }
         self.shown = Default::default();
+        self.played_by = None;
         match config::save(&self.cfg) {
             Ok(()) => self.note = Some((format!("Opponent: {}. Kept in ~/.gambit/config.yml.", opponent::describe(&self.cfg)), t::OK)),
             Err(e) => self.note = Some((format!("Could not save the settings: {e}"), t::ERR)),
         }
+    }
+
+    /// The names `claude --model` takes. Anything else can be typed.
+    fn choose_claude_model(&mut self) {
+        const MODELS: [(&str, &str); 5] = [
+            ("", "whatever the command uses by default"),
+            ("haiku", "quickest and cheapest"),
+            ("sonnet", "in between"),
+            ("opus", "slowest, strongest, dearest"),
+            ("?", "type a name, such as claude-opus-5"),
+        ];
+        let lines: Vec<String> = MODELS.iter()
+            .map(|(m, what)| format!(" {:<8} {}", if m.is_empty() { "default" } else { m }, style::fg(what, t::DIM)))
+            .collect();
+        let mut menu = self.popup(54, lines.len() as u16);
+        menu.pane.index = MODELS.iter().position(|(m, _)| *m == self.cfg.model.trim()).unwrap_or(0);
+        let picked = menu.modal(&lines.join("\n"));
+        menu.dismiss(&mut [&mut self.header, &mut self.board_p, &mut self.side_p, &mut self.footer]);
+        self.shown = Default::default();
+        let Some(i) = picked else { return };
+        self.cfg.model = if MODELS[i].0 == "?" {
+            let typed = self.footer.ask(" model: ", &self.cfg.model);
+            Cursor::hide();
+            typed.trim().to_string()
+        } else {
+            MODELS[i].0.to_string()
+        };
+    }
+
+    // ---- lichess ------------------------------------------------------
+
+    /// Start or leave a game on lichess. The model plays no part there:
+    /// lichess forbids engine help on an ordinary account.
+    fn lichess_menu(&mut self) {
+        if self.cfg.lichess_token.trim().is_empty() && std::env::var("LICHESS_TOKEN").is_err() {
+            self.note = Some((
+                "Paste a lichess token with the board:play right. Make one at lichess.org/account/oauth/token".into(),
+                t::ACCENT));
+            self.render();
+            let token = self.footer.ask(" lichess token: ", "");
+            Cursor::hide();
+            self.shown = Default::default();
+            if token.trim().is_empty() { return; }
+            self.cfg.lichess_token = token.trim().to_string();
+            let _ = config::save(&self.cfg);
+        }
+        let who = match lichess::whoami(&self.cfg) {
+            Ok(name) => name,
+            Err(why) => { self.note = Some((format!("lichess: {why}"), t::ERR)); return; }
+        };
+        let items = [
+            " play the lichess computer".to_string(),
+            " look for a game, ten minutes, casual".to_string(),
+            " look for a game, ten minutes, rated".to_string(),
+            " take up the game I have going".to_string(),
+            " leave lichess, play the model again".to_string(),
+        ];
+        let mut menu = self.popup(52, items.len() as u16);
+        let picked = menu.modal(&items.join("\n"));
+        menu.dismiss(&mut [&mut self.header, &mut self.board_p, &mut self.side_p, &mut self.footer]);
+        self.shown = Default::default();
+        match picked {
+            Some(0) => self.lichess_computer(&who),
+            Some(1) => self.lichess_seek(&who, false),
+            Some(2) => self.lichess_seek(&who, true),
+            Some(3) => match lichess::ongoing(&self.cfg) {
+                Ok(Some(id)) => self.lichess_join(&who, &id),
+                Ok(None) => self.note = Some(("No game going on lichess right now.".into(), t::DIM)),
+                Err(why) => self.note = Some((format!("lichess: {why}"), t::ERR)),
+            },
+            Some(4) => {
+                self.live = None;
+                self.lichess_events = None;
+                self.new_game();
+                self.note = Some(("Back to the model.".into(), t::OK));
+            }
+            _ => {}
+        }
+    }
+
+    fn lichess_computer(&mut self, who: &str) {
+        let levels: Vec<String> = (1..=8).map(|l| format!(" level {l}{}", match l {
+            1 => "   a beginner", 4 => "   club strength", 8 => "   no chance", _ => "" })).collect();
+        let mut menu = self.popup(40, levels.len() as u16);
+        menu.pane.index = 2;
+        let picked = menu.modal(&levels.join("\n"));
+        menu.dismiss(&mut [&mut self.header, &mut self.board_p, &mut self.side_p, &mut self.footer]);
+        self.shown = Default::default();
+        let Some(i) = picked else { return };
+        let white = self.me == Color::White;
+        match lichess::play_computer(&self.cfg, i as u8 + 1, white) {
+            Ok(id) => self.lichess_join(who, &id),
+            Err(why) => self.note = Some((format!("lichess: {why}"), t::ERR)),
+        }
+    }
+
+    fn lichess_seek(&mut self, who: &str, rated: bool) {
+        let (tx, rx) = channel();
+        if let Err(why) = lichess::watch_events(&self.cfg, tx) {
+            self.note = Some((format!("lichess: {why}"), t::ERR));
+            return;
+        }
+        self.lichess_events = Some(rx);
+        match lichess::seek(&self.cfg, rated) {
+            Ok(()) => self.note = Some((format!("Looking for a {} game as {who}. It starts here when somebody takes it.",
+                if rated { "rated" } else { "casual" }), t::OK)),
+            Err(why) => self.note = Some((format!("lichess: {why}"), t::ERR)),
+        }
+    }
+
+    /// Follow a game from now on: the board becomes that game.
+    fn lichess_join(&mut self, who: &str, id: &str) {
+        let (tx, rx) = channel();
+        if let Err(why) = lichess::watch_game(&self.cfg, id, who, tx) {
+            self.note = Some((format!("lichess: {why}"), t::ERR));
+            return;
+        }
+        self.live = Some(Live {
+            id: id.to_string(),
+            opponent: "lichess".into(),
+            events: rx,
+            clocks: (600, 600),
+            since: Instant::now(),
+            ended: false,
+        });
+        self.new_game();
+        self.thinking = None;
+        self.note = Some((format!("Game {id} on lichess. Your moves only: engine help is against their rules."), t::ACCENT));
+    }
+
+    /// Take in whatever the lichess streams have said.
+    fn collect_lichess(&mut self) {
+        // A game that started while looking for one.
+        let started = self.lichess_events.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(lichess::Event::Started { id, .. }) = started {
+            let who = lichess::whoami(&self.cfg).unwrap_or_default();
+            self.lichess_join(&who, &id);
+        }
+        let mut fresh = Vec::new();
+        if let Some(live) = self.live.as_ref() {
+            while let Ok(event) = live.events.try_recv() { fresh.push(event); }
+        }
+        for event in fresh {
+            match event {
+                lichess::Event::Started { white, opponent, .. } => {
+                    if let Some(live) = self.live.as_mut() { live.opponent = opponent; }
+                    self.me = if white { Color::White } else { Color::Black };
+                    self.flip = !white;
+                    self.cursor = if white { 4 } else { 60 };
+                }
+                lichess::Event::Moves { moves, white_time, black_time } => {
+                    if let Some(live) = self.live.as_mut() {
+                        live.clocks = (white_time, black_time);
+                        live.since = Instant::now();
+                    }
+                    self.replay(&moves);
+                }
+                lichess::Event::Ended { status, winner } => {
+                    if let Some(live) = self.live.as_mut() { live.ended = true; }
+
+                    let says = match (status.as_str(), winner.as_deref()) {
+                        ("mate", Some(w)) => format!("Checkmate: {w} wins"),
+                        ("resign", Some(w)) => format!("Resigned: {w} wins"),
+                        ("outoftime", Some(w)) => format!("Out of time: {w} wins"),
+                        ("aborted", _) => "The game was aborted".to_string(),
+                        (other, Some(w)) => format!("{other}: {w} wins"),
+                        (other, None) => format!("The game ended in a draw ({other})"),
+                    };
+                    self.note = Some((says, t::ACCENT));
+                }
+                lichess::Event::Trouble(why) => self.note = Some((format!("lichess: {why}"), t::ERR)),
+            }
+        }
+    }
+
+    /// Set the board to the moves lichess has recorded.
+    fn replay(&mut self, moves: &[String]) {
+        let mut pos = Position::start();
+        let mut seen = vec![pos.key()];
+        let mut played = Vec::new();
+        let mut last = None;
+        for uci in moves {
+            let Some(mv) = pos.parse_move(uci) else { break };
+            played.push(pos.san(mv));
+            pos = pos.after(mv);
+            seen.push(pos.key());
+            last = Some(mv);
+        }
+        self.pos = pos;
+        self.seen = seen;
+        self.played = played;
+        self.back.clear();
+        self.last = last;
+        self.picked = None;
+        self.over = self.pos.over(&self.seen);
+    }
+
+    fn resign(&mut self) {
+        let Some(live) = &self.live else { return };
+        if live.ended { return; }
+        let id = live.id.clone();
+        match lichess::resign(&self.cfg, &id) {
+            Ok(()) => self.note = Some(("You resigned.".into(), t::DIM)),
+            Err(why) => self.note = Some((format!("lichess: {why}"), t::ERR)),
+        }
+    }
+
+    /// A bordered popup in the lower right corner, clear of the board.
+    fn popup(&self, w: u16, h: u16) -> Popup {
+        let x = self.cols.saturating_sub(w + 2).max(2);
+        let y = self.rows.saturating_sub(h + 2).max(2);
+        Popup::new(x, y, w, h, t::FG as u16, 234)
     }
 
     /// Write the game where other chess programs can read it.
@@ -472,34 +765,31 @@ impl App {
     }
 
     fn help(&mut self) {
-        let mut p = Pane::new(4, 3, 60, 20, t::FG as u16, 234);
-        p.wrap = false;
-        p.scroll = false;
         let k = |s: &str| style::fg(s, t::ACCENT);
         let lines = [
-            format!("  {}", style::bold(&style::fg("gambit — keys", t::ACCENT))),
+            format!(" {:<14} move the cursor", k("arrows / hjkl")),
+            format!(" {:<14} pick a piece up, put it down", k("ENTER")),
+            format!(" {:<14} let the piece go", k("ESC")),
+            format!(" {:<14} type a move instead (e4, Nf3, e2e4)", k("/")),
+            format!(" {:<14} take back your move and the answer", k("u")),
+            format!(" {:<14} a new game", k("n")),
+            format!(" {:<14} play the other colour, from a new game", k("c")),
+            format!(" {:<14} turn the board around", k("f")),
+            format!(" {:<14} pick the opponent and the model", k("o")),
+            format!(" {:<14} play on lichess, or leave it", k("L")),
+            format!(" {:<14} resign a lichess game", k("R")),
+            format!(" {:<14} write the game to ~/.gambit/game.pgn", k("s")),
+            format!(" {:<14} quit", k("q")),
             String::new(),
-            format!("  {:<14} move the cursor", k("arrows / hjkl")),
-            format!("  {:<14} pick a piece up, put it down", k("ENTER")),
-            format!("  {:<14} let the piece go", k("ESC")),
-            format!("  {:<14} type a move instead (e4, Nf3, e2e4)", k("/")),
-            format!("  {:<14} take back your move and the answer", k("u")),
-            format!("  {:<14} a new game", k("n")),
-            format!("  {:<14} turn the board around", k("f")),
-            format!("  {:<14} pick the opponent and the model", k("o")),
-            format!("  {:<14} write the game to ~/.gambit/game.pgn", k("s")),
-            format!("  {:<14} quit", k("q")),
+            format!(" {}", style::fg("The opponent is told the position and every legal", t::DIM)),
+            format!(" {}", style::fg("move. An answer that is not one of them is asked", t::DIM)),
+            format!(" {}", style::fg("again twice, then gambit plays a plain move.", t::DIM)),
             String::new(),
-            format!("  {}", style::fg("The opponent gets the position and every legal", t::DIM)),
-            format!("  {}", style::fg("move, and answers with one of them. An illegal", t::DIM)),
-            format!("  {}", style::fg("answer is asked again twice.", t::DIM)),
-            String::new(),
-            format!("  {}", style::fg("Any key closes this.", t::DIM)),
+            format!(" {}", style::fg("ESC, q or ENTER closes this.", t::DIM)),
         ];
-        p.set_text(&lines.join("\n"));
-        p.full_refresh();
-        let _ = Input::getchr(None);
-        Crust::clear_screen();
+        let mut p = self.popup(56, lines.len() as u16);
+        p.view(&lines.join("\n"));
+        p.dismiss(&mut [&mut self.header, &mut self.board_p, &mut self.side_p, &mut self.footer]);
         self.shown = Default::default();
     }
 
@@ -612,6 +902,7 @@ fn main() {
             if app.handle(&key) { break; }
         }
         app.collect_move();
+        app.collect_lichess();
         if app.resized() { /* panes remade */ }
         app.render();
     }

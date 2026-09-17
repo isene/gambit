@@ -36,8 +36,11 @@ Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 | `/` | type a move instead: `e4`, `Nf3`, `exd5`, `O-O`, `e2e4` |
 | `u` | take back your move and the answer to it |
 | `n` | a new game |
+| `c` | play the other colour, from a new game |
 | `f` | turn the board around |
-| `o` | pick the opponent and the model |
+| `o` | pick the opponent and the model, from a menu |
+| `L` | play on lichess, or leave it |
+| `R` | resign a lichess game |
 | `s` | write the game to `~/.gambit/game.pgn` |
 | `?` | every key |
 | `q` | quit |
@@ -61,6 +64,7 @@ api_key: ""               # or ANTHROPIC_API_KEY / OPENAI_API_KEY in the environ
 base_url: "https://api.openai.com/v1"   # any OpenAI-shaped service
 command: ""               # for opponent: command
 side: white               # the side you play
+lichess_token: ""         # or LICHESS_TOKEN in the environment
 ```
 
 - **claude** needs no key: it runs `claude -p` and reads the answer. A move
@@ -73,6 +77,22 @@ side: white               # the side you play
 - **command** runs whatever you name. It gets the question on standard
   input and prints one move. Two lines of Python are enough to play a
   random legal move, which is how gambit is tested.
+
+## Lichess
+
+`L` plays on [lichess](https://lichess.org) instead: their computer at any
+of its eight levels, or a real opponent over ten minutes. gambit becomes
+your board. It follows the game as it is played, shows both clocks, and
+sends your moves.
+
+It needs a token with the "Play games with the board API" right, from
+<https://lichess.org/account/oauth/token/create?scopes[]=board:play>. `L`
+asks for it once and keeps it in the config.
+
+The moves there are yours. Lichess forbids engine help on an ordinary
+account, so the model plays no part in a lichess game, and gambit does not
+offer to. A model that plays belongs on a BOT account, which is a separate
+thing and cannot be undone.
 
 ## How strong is it
 

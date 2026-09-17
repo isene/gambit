@@ -33,6 +33,12 @@ pub struct Config {
     /// The side you play: `white` or `black`.
     #[serde(default = "default_side")]
     pub side: String,
+
+    /// A lichess token with the "Play games with the board API" right, from
+    /// <https://lichess.org/account/oauth/token/create?scopes[]=board:play>.
+    /// Empty reads `LICHESS_TOKEN` from the environment instead.
+    #[serde(default)]
+    pub lichess_token: String,
 }
 
 fn default_opponent() -> String { "claude".into() }
@@ -48,6 +54,7 @@ impl Default for Config {
             base_url: default_base_url(),
             command: String::new(),
             side: default_side(),
+            lichess_token: String::new(),
         }
     }
 }
