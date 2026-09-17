@@ -221,10 +221,13 @@ impl App {
     fn add_taken(&self, lines: &mut [String], at: usize, sq_h: usize) {
         let (mine, theirs) = (lost(&self.pos, self.me), lost(&self.pos, self.me.other()));
         let score = points(&theirs) - points(&mine);
+        // The pile sits on a light strip: black pieces are invisible against
+        // the dark behind the board.
         let row = |pieces: &[Piece], color: Color| -> String {
             if pieces.is_empty() { return style::fg("nothing yet", t::DIM); }
             let glyphs: String = pieces.iter().map(|p| piece_glyph(*p, color)).collect();
-            style::fg(&glyphs, if color == Color::White { t::WHITE_PIECE } else { t::BLACK_PIECE })
+            let fg = if color == Color::White { t::WHITE_PIECE } else { t::BLACK_PIECE };
+            style::fb(&format!(" {glyphs} "), fg, t::LIGHT)
         };
         let lead = |n: i32| if n > 0 { style::fg(&format!("  +{n}"), t::OK) } else { String::new() };
         // Each pile goes beside the player who took it, so it follows the
