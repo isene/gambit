@@ -23,13 +23,13 @@ const SIDE_W: u16 = 34;
 /// How wide and tall one square is drawn, in cells. A cell is about twice
 /// as tall as it is wide, so these pairs all come out roughly square. The
 /// biggest one that fits the window wins, and the piece sits in the middle.
-const SIZES: [(usize, usize); 3] = [(6, 3), (4, 2), (2, 1)];
+const SIZES: [(usize, usize); 4] = [(8, 4), (6, 3), (4, 2), (2, 1)];
 
 fn square_size(cols: u16, rows: u16) -> (usize, usize) {
     let room = |(w, h): (usize, usize)| {
         8 * w + 5 + SIDE_W as usize <= cols as usize && 8 * h + 4 <= rows as usize
     };
-    SIZES.into_iter().find(|s| room(*s)).unwrap_or(SIZES[2])
+    SIZES.into_iter().find(|s| room(*s)).unwrap_or(SIZES[SIZES.len() - 1])
 }
 
 mod t {
@@ -65,8 +65,11 @@ struct App {
     last: Option<Move>,
     over: Option<Over>,
     /// The model's call, running on its own thread.
-    thinking: Option<(Receiver<Result<String, String>>, Instant, u8)>,
+    thinking: Option<(Receiver<Result<opponent::Answer, String>>, Instant, u8)>,
     note: Option<(String, u8)>,
+    /// The model that answered last, and what the game has cost so far.
+    played_by: Option<String>,
+    spent: f64,
     flip: bool,
     header: Pane,
     board_p: Pane,
@@ -86,6 +89,7 @@ impl App {
         let mut app = App {
             cfg, pos: Position::start(), seen: Vec::new(), played: Vec::new(), back: Vec::new(),
             me, cursor: 4, picked: None, last: None, over: None, thinking: None, note: None,
+            played_by: None, spent: 0.0,
             flip: me == Color::Black,
             header: Pane::new(1, 1, cols, 1, t::FG as u16, t::BAR as u16),
             board_p: Pane::new(1, 2, cols.saturating_sub(SIDE_W), rows.saturating_sub(2), t::FG as u16, 0),
@@ -123,7 +127,11 @@ impl App {
         let left = format!(" {}  {}",
             style::bold(&style::fg("gambit", t::ACCENT)),
             style::fg(&format!("you play {you}"), t::DIM));
-        let right = format!("{}  v{} ", style::fg(&opponent::describe(&self.cfg), t::OK), VERSION);
+        let who = match &self.played_by {
+            Some(id) => format!("{} · {}", opponent::describe(&self.cfg), opponent::pretty_model(id)),
+            None => opponent::describe(&self.cfg),
+        };
+        let right = format!("{}  v{} ", style::fg(&who, t::OK), VERSION);
         let pad = (self.cols as usize).saturating_sub(crust::display_width(&left) + crust::display_width(&right));
         format!("{left}{}{right}", " ".repeat(pad))
     }
@@ -151,16 +159,25 @@ impl App {
                     if Some(sq) == self.picked { bg = t::PICKED; }
                     if check && self.pos.piece_at(sq) == Some((self.pos.turn, Piece::King)) { bg = t::CHECK; }
                     if sq == self.cursor { bg = t::CURSOR; }
-                    let (glyph, fg) = match self.pos.piece_at(sq) {
-                        Some((c, p)) => (piece_glyph(p), if c == Color::White { t::WHITE_PIECE } else { t::BLACK_PIECE }),
-                        None => (' ', t::FG),
+                    let here = self.pos.piece_at(sq);
+                    let fg = match here {
+                        Some((Color::White, _)) => t::WHITE_PIECE,
+                        Some((Color::Black, _)) => t::BLACK_PIECE,
+                        None => t::FG,
                     };
-                    let cell = if sub == mid_row {
-                        let g = glyph.to_string();
-                        let after = sq_w.saturating_sub(mid_col + crust::display_width(&g));
-                        format!("{}{}{}", " ".repeat(mid_col), g, " ".repeat(after))
-                    } else {
+                    // The glyph on the middle row, its letter below when the
+                    // square is tall enough: knight, bishop and pawn are hard
+                    // to tell apart at this size otherwise.
+                    let mark = match (here, sq_h >= 3 && sub == mid_row + 1) {
+                        (Some((c, p)), false) => piece_glyph(p, c).to_string(),
+                        (Some((c, p)), true) => piece_letter(p, c).to_string(),
+                        (None, _) => String::new(),
+                    };
+                    let cell = if mark.is_empty() || (sub != mid_row && !(sq_h >= 3 && sub == mid_row + 1)) {
                         " ".repeat(sq_w)
+                    } else {
+                        let after = sq_w.saturating_sub(mid_col + crust::display_width(&mark));
+                        format!("{}{}{}", " ".repeat(mid_col), mark, " ".repeat(after))
                     };
                     line.push_str(&style::fb(&cell, fg, bg));
                 }
@@ -203,6 +220,9 @@ impl App {
         }
         l.push(String::new());
         l.push(format!(" {}", self.status()));
+        if self.spent > 0.0 {
+            l.push(format!(" {}", style::fg(&format!("this game has cost ${:.2}", self.spent), t::DIM)));
+        }
         if let Some((note, color)) = &self.note {
             l.push(String::new());
             for line in wrap(note, SIDE_W as usize - 2) { l.push(format!(" {}", style::fg(&line, *color))); }
@@ -264,8 +284,10 @@ impl App {
                 self.note = Some((format!("The opponent did not answer. {why}"), t::ERR));
                 self.play_fallback();
             }
-            Ok(text) => {
-                let word = text.lines().last().unwrap_or("").trim().to_string();
+            Ok(answer) => {
+                if answer.model.is_some() { self.played_by = answer.model.clone(); }
+                self.spent += answer.cost.unwrap_or(0.0);
+                let word = answer.text.lines().last().unwrap_or("").trim().to_string();
                 match self.pos.parse_move(&word) {
                     Some(mv) => self.play(mv),
                     None if attempt < 2 => {
@@ -501,11 +523,23 @@ impl App {
     }
 }
 
-fn piece_glyph(p: Piece) -> char {
-    match p {
-        Piece::King => '♚', Piece::Queen => '♛', Piece::Rook => '♜',
-        Piece::Bishop => '♝', Piece::Knight => '♞', Piece::Pawn => '♟',
+/// White gets the hollow pieces, black the filled ones. Two shapes beat
+/// one shape in two colours when the squares are small.
+fn piece_glyph(p: Piece, c: Color) -> char {
+    match (c, p) {
+        (Color::White, Piece::King) => '♔', (Color::White, Piece::Queen) => '♕',
+        (Color::White, Piece::Rook) => '♖', (Color::White, Piece::Bishop) => '♗',
+        (Color::White, Piece::Knight) => '♘', (Color::White, Piece::Pawn) => '♙',
+        (Color::Black, Piece::King) => '♚', (Color::Black, Piece::Queen) => '♛',
+        (Color::Black, Piece::Rook) => '♜', (Color::Black, Piece::Bishop) => '♝',
+        (Color::Black, Piece::Knight) => '♞', (Color::Black, Piece::Pawn) => '♟',
     }
+}
+
+/// White in capitals, black in small letters, as chess diagrams write them.
+fn piece_letter(p: Piece, c: Color) -> char {
+    let l = if p == Piece::Pawn { 'P' } else { p.letter() };
+    if c == Color::White { l } else { l.to_ascii_lowercase() }
 }
 
 /// The move that leaves the most material after the best answer to it.
@@ -601,9 +635,18 @@ mod tests {
 
     #[test]
     fn the_board_grows_with_the_window() {
-        assert_eq!(square_size(120, 40), (6, 3));
+        assert_eq!(square_size(120, 40), (8, 4));
+        assert_eq!(square_size(100, 30), (6, 3));
         assert_eq!(square_size(80, 24), (4, 2));
         assert_eq!(square_size(60, 12), (2, 1));
+    }
+
+    #[test]
+    fn white_and_black_pieces_look_different() {
+        assert_eq!(piece_glyph(Piece::Knight, Color::White), '♘');
+        assert_eq!(piece_glyph(Piece::Knight, Color::Black), '♞');
+        assert_eq!(piece_letter(Piece::Pawn, Color::White), 'P');
+        assert_eq!(piece_letter(Piece::Knight, Color::Black), 'n');
     }
 
     #[test]

@@ -12,6 +12,11 @@ them: `e4`, `Nf3`, `O-O`. The other side is a model. By default that is the
 OpenAI's, anything that speaks the same shape (OpenRouter, a server on your
 own machine), or a command of your own.
 
+The board fills the window, and every piece carries its letter under it:
+capitals for White, small letters for Black. The header names the model
+that actually answered, and the panel keeps the running cost when the
+opponent reports one.
+
 gambit knows the rules. Castling, en passant, promotion, stalemate, the
 fifty move rule, a threefold repetition, too few pieces to mate: all of it
 is counted, and proven by the move counts chess programmers test with.
@@ -59,7 +64,9 @@ side: white               # the side you play
 ```
 
 - **claude** needs no key: it runs `claude -p` and reads the answer. A move
-  takes ten seconds or so. `model: haiku` makes it quicker and cheaper.
+  takes ten seconds or so, and costs a few cents, because the command
+  carries its own tools and instructions into every call. `model: haiku`
+  makes it quicker and cheaper. The API below is cheaper still.
 - **anthropic** posts to `api.anthropic.com` with your key.
 - **openai** posts to `base_url`, so it also reaches OpenRouter, Groq, or a
   model running on your own machine.

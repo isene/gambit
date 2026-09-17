@@ -44,8 +44,22 @@ fn numbered(played: &[String]) -> String {
     out.trim_end().to_string()
 }
 
+/// What came back: the move, and what the answer says about itself.
+#[derive(Default, Debug, Clone)]
+pub struct Answer {
+    pub text: String,
+    /// The model that actually answered, when it says so.
+    pub model: Option<String>,
+    /// What the answer cost, in dollars, when it says so.
+    pub cost: Option<f64>,
+}
+
+impl Answer {
+    fn plain(text: String) -> Answer { Answer { text, ..Answer::default() } }
+}
+
 /// Ask the opponent and hand back what it said.
-pub fn ask(cfg: &Config, question: &str) -> Result<String, String> {
+pub fn ask(cfg: &Config, question: &str) -> Result<Answer, String> {
     match cfg.opponent.trim() {
         "claude" | "" => claude(cfg, question),
         "anthropic" => anthropic(cfg, question),
@@ -53,6 +67,21 @@ pub fn ask(cfg: &Config, question: &str) -> Result<String, String> {
         "command" => shell(cfg, question),
         other => Err(format!("unknown opponent \"{other}\": use claude, anthropic, openai or command")),
     }
+}
+
+/// A model name as it reads in the header: claude-haiku-4-5-20251001
+/// becomes haiku 4.5.
+pub fn pretty_model(id: &str) -> String {
+    let id = id.trim().trim_start_matches("claude-");
+    let mut parts: Vec<&str> = id.split('-').collect();
+    // The date at the end is noise.
+    if parts.last().is_some_and(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_digit())) { parts.pop(); }
+    let name = parts.remove(0);
+    if parts.is_empty() { return name.to_string(); }
+    if parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())) {
+        return format!("{name} {}", parts.join("."));
+    }
+    format!("{name} {}", parts.join(" "))
 }
 
 /// How the opponent is named in the header.
@@ -72,17 +101,33 @@ fn host_of(url: &str) -> String {
         .split('/').next().unwrap_or(url).to_string()
 }
 
-fn claude(cfg: &Config, question: &str) -> Result<String, String> {
+fn claude(cfg: &Config, question: &str) -> Result<Answer, String> {
     let mut cmd = Command::new("claude");
-    cmd.arg("-p").arg(question);
+    // The JSON form also says which model answered and what it cost.
+    cmd.arg("-p").arg(question).arg("--output-format").arg("json");
     if !cfg.model.trim().is_empty() { cmd.arg("--model").arg(cfg.model.trim()); }
+    // Away from any project, so the command has no repository to read.
+    if let Ok(home) = std::env::var("HOME") { cmd.current_dir(home); }
     let out = cmd.stdin(Stdio::null()).output()
         .map_err(|e| format!("the claude command did not run ({e}). Install Claude Code, or set another opponent with o."))?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         return Err(format!("claude said: {}", first_line(&why)));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(from_claude_json(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Pull the move, the model and the cost out of what `claude -p --output-format
+/// json` prints. Plain text still works, in case that output ever changes.
+fn from_claude_json(out: &str) -> Answer {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(out.trim()) else {
+        return Answer::plain(out.trim().to_string());
+    };
+    let text = v.get("result").and_then(|r| r.as_str()).unwrap_or(out.trim()).trim().to_string();
+    let model = v.get("modelUsage").and_then(|m| m.as_object())
+        .and_then(|m| m.keys().next().cloned());
+    let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
+    Answer { text, model, cost }
 }
 
 fn key_for(cfg: &Config, env: &str) -> Result<String, String> {
@@ -91,7 +136,7 @@ fn key_for(cfg: &Config, env: &str) -> Result<String, String> {
     Ok(key)
 }
 
-fn anthropic(cfg: &Config, question: &str) -> Result<String, String> {
+fn anthropic(cfg: &Config, question: &str) -> Result<Answer, String> {
     let key = key_for(cfg, "ANTHROPIC_API_KEY")?;
     let model = if cfg.model.trim().is_empty() { "claude-sonnet-5" } else { cfg.model.trim() };
     let body = serde_json::json!({
@@ -108,12 +153,14 @@ fn anthropic(cfg: &Config, question: &str) -> Result<String, String> {
         .map_err(describe_error)?
         .into_string().map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&answer).map_err(|e| e.to_string())?;
-    v.pointer("/content/0/text").and_then(|t| t.as_str())
+    let text = v.pointer("/content/0/text").and_then(|t| t.as_str())
         .map(|s| s.trim().to_string())
-        .ok_or_else(|| format!("no text in the answer: {}", first_line(&answer)))
+        .ok_or_else(|| format!("no text in the answer: {}", first_line(&answer)))?;
+    let said = v.get("model").and_then(|m| m.as_str()).map(String::from);
+    Ok(Answer { text, model: said.or(Some(model.to_string())), cost: None })
 }
 
-fn openai(cfg: &Config, question: &str) -> Result<String, String> {
+fn openai(cfg: &Config, question: &str) -> Result<Answer, String> {
     let key = key_for(cfg, "OPENAI_API_KEY")?;
     let model = if cfg.model.trim().is_empty() { "gpt-5" } else { cfg.model.trim() };
     let base = cfg.base_url.trim().trim_end_matches('/');
@@ -129,12 +176,14 @@ fn openai(cfg: &Config, question: &str) -> Result<String, String> {
         .map_err(describe_error)?
         .into_string().map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&answer).map_err(|e| e.to_string())?;
-    v.pointer("/choices/0/message/content").and_then(|t| t.as_str())
+    let text = v.pointer("/choices/0/message/content").and_then(|t| t.as_str())
         .map(|s| s.trim().to_string())
-        .ok_or_else(|| format!("no text in the answer: {}", first_line(&answer)))
+        .ok_or_else(|| format!("no text in the answer: {}", first_line(&answer)))?;
+    let said = v.get("model").and_then(|m| m.as_str()).map(String::from);
+    Ok(Answer { text, model: said.or(Some(model.to_string())), cost: None })
 }
 
-fn shell(cfg: &Config, question: &str) -> Result<String, String> {
+fn shell(cfg: &Config, question: &str) -> Result<Answer, String> {
     if cfg.command.trim().is_empty() { return Err("no command set in ~/.gambit/config.yml".into()); }
     let mut child = Command::new("sh").arg("-c").arg(cfg.command.trim())
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -146,7 +195,7 @@ fn shell(cfg: &Config, question: &str) -> Result<String, String> {
     if !out.status.success() {
         return Err(format!("the command said: {}", first_line(&String::from_utf8_lossy(&out.stderr))));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(Answer::plain(String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
 /// An API error, with the server's own words when it sent any.
@@ -186,10 +235,24 @@ mod tests {
     #[test]
     fn a_command_of_your_own_answers_on_standard_input() {
         let cfg = Config { opponent: "command".into(), command: "grep -o 'You are [A-Za-z]*' | head -1".into(), ..Config::default() };
-        assert_eq!(ask(&cfg, "We are playing chess. You are Black.").unwrap(), "You are Black");
+        assert_eq!(ask(&cfg, "We are playing chess. You are Black.").unwrap().text, "You are Black");
         let empty = Config { opponent: "command".into(), ..Config::default() };
         assert!(ask(&empty, "x").is_err());
         assert!(ask(&Config { opponent: "wat".into(), ..Config::default() }, "x").is_err());
+    }
+
+    #[test]
+    fn the_claude_answer_says_which_model_played_and_what_it_cost() {
+        let json = r#"{"result":"Nf6","total_cost_usd":0.0455,
+            "modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":1071}}}"#;
+        let a = from_claude_json(json);
+        assert_eq!(a.text, "Nf6");
+        assert_eq!(a.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(a.cost, Some(0.0455));
+        assert_eq!(from_claude_json("e4\n").text, "e4", "plain text still works");
+        assert_eq!(pretty_model("claude-haiku-4-5-20251001"), "haiku 4.5");
+        assert_eq!(pretty_model("claude-opus-5"), "opus 5");
+        assert_eq!(pretty_model("gpt-5"), "gpt 5");
     }
 
     #[test]
