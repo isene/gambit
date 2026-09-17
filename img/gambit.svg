@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#141420"/>
+      <stop offset="100%" style="stop-color:#08080e"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f74c00"/>
+      <stop offset="100%" style="stop-color:#b7410e"/>
+    </linearGradient>
+    <linearGradient id="pale" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f2e4cf"/>
+      <stop offset="100%" style="stop-color:#cdb494"/>
+    </linearGradient>
+    <clipPath id="ring">
+      <circle cx="128" cy="128" r="118"/>
+    </clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#bg)" stroke="url(#rust)" stroke-width="3"/>
+
+  <!-- the board the pieces stand on, eight squares of it -->
+  <g clip-path="url(#ring)">
+    <rect x="32" y="150" width="192" height="26" fill="#3a2a24"/>
+    <g fill="#d9b382">
+      <rect x="32" y="150" width="24" height="26"/>
+      <rect x="80" y="150" width="24" height="26"/>
+      <rect x="128" y="150" width="24" height="26"/>
+      <rect x="176" y="150" width="24" height="26"/>
+    </g>
+    <rect x="32" y="176" width="192" height="12" fill="#241a16"/>
+  </g>
+
+  <!-- a white pawn, one square away from a rust one: the gambit -->
+  <g fill="url(#pale)">
+    <circle cx="92" cy="104" r="14"/>
+    <rect x="78" y="120" width="28" height="7" rx="3.5"/>
+    <path d="M82 127 h20 l-3 9 c-4 6 -5 10 -5 14 h-4 c0 -4 -1 -8 -5 -14 z"/>
+    <path d="M76 150 h32 l5 12 h-42 z"/>
+  </g>
+  <g fill="url(#rust)">
+    <circle cx="160" cy="92" r="17"/>
+    <rect x="142" y="111" width="36" height="8" rx="4"/>
+    <path d="M147 119 h26 l-4 11 c-5 8 -6 13 -6 18 h-6 c0 -5 -1 -10 -6 -18 z"/>
+    <path d="M139 148 h42 l6 14 h-54 z"/>
+  </g>
+
+  <text x="128" y="212" font-family="monospace" font-size="22" font-weight="bold" fill="url(#rust)" text-anchor="middle" letter-spacing="3">gambit</text>
+  <text x="128" y="228" font-family="monospace" font-size="8" fill="#888" text-anchor="middle">chess against a model</text>
+</svg>
