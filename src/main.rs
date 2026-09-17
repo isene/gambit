@@ -207,12 +207,38 @@ impl App {
                 lines.push(line);
             }
         }
+        self.add_taken(&mut lines, 4 + 8 * sq_w + 3, sq_h);
         let files: String = (0..8).map(|col| {
             let file = if self.flip { 7 - col } else { col };
             format!("{:^width$}", (b'a' + file as u8) as char, width = sq_w)
         }).collect();
         lines.push(format!("     {}", style::fg(&files, t::DIM)));
         lines.join("\n")
+    }
+
+    /// Write what each side has taken beside the board: the pieces you took
+    /// under your end of it, theirs at the top, and who is ahead on points.
+    fn add_taken(&self, lines: &mut [String], at: usize, sq_h: usize) {
+        let (mine, theirs) = (lost(&self.pos, self.me), lost(&self.pos, self.me.other()));
+        let score = points(&theirs) - points(&mine);
+        let row = |pieces: &[Piece], color: Color| -> String {
+            if pieces.is_empty() { return style::fg("nothing yet", t::DIM); }
+            let glyphs: String = pieces.iter().map(|p| piece_glyph(*p, color)).collect();
+            style::fg(&glyphs, if color == Color::White { t::WHITE_PIECE } else { t::BLACK_PIECE })
+        };
+        let lead = |n: i32| if n > 0 { style::fg(&format!("  +{n}"), t::OK) } else { String::new() };
+        // Each pile goes beside the player who took it, so it follows the
+        // board when you turn it around.
+        let mine_at_bottom = (self.me == Color::White) != self.flip;
+        let last = 8 * sq_h;
+        let (they_row, you_row) = if mine_at_bottom { (1, last - 1) } else { (last - 1, 1) };
+        for (row_at, label, pieces) in [
+            (they_row, "they took", format!("{}{}", row(&mine, self.me), lead(-score))),
+            (you_row, "you took", format!("{}{}", row(&theirs, self.me.other()), lead(score))),
+        ] {
+            put(lines, row_at, at, &style::fg(label, t::DIM));
+            put(lines, row_at + 1, at, &pieces);
+        }
     }
 
     /// A square the picked piece may move to.
@@ -827,6 +853,39 @@ fn piece_glyph(p: Piece, c: Color) -> char {
 }
 
 /// White in capitals, black in small letters, as chess diagrams write them.
+/// The pieces `color` has lost. A pawn that turned into a queen still
+/// stands on the board, so a count never goes below nothing.
+fn lost(pos: &Position, color: Color) -> Vec<Piece> {
+    const FULL: [(Piece, usize); 5] = [
+        (Piece::Queen, 1), (Piece::Rook, 2), (Piece::Bishop, 2), (Piece::Knight, 2), (Piece::Pawn, 8),
+    ];
+    let mut out = Vec::new();
+    for (piece, start) in FULL {
+        let mut have = 0;
+        for sq in 0..64u8 {
+            if pos.piece_at(sq) == Some((color, piece)) { have += 1; }
+        }
+        for _ in 0..start.saturating_sub(have) { out.push(piece); }
+    }
+    out
+}
+
+/// Put `text` on line `row`, starting at column `at`.
+fn put(lines: &mut [String], row: usize, at: usize, text: &str) {
+    let Some(line) = lines.get_mut(row) else { return };
+    let pad = at.saturating_sub(crust::display_width(line));
+    line.push_str(&" ".repeat(pad));
+    line.push_str(text);
+}
+
+/// What a pile of taken pieces is worth, the way players count.
+fn points(pieces: &[Piece]) -> i32 {
+    pieces.iter().map(|p| match p {
+        Piece::Pawn => 1, Piece::Knight | Piece::Bishop => 3,
+        Piece::Rook => 5, Piece::Queen => 9, Piece::King => 0,
+    }).sum()
+}
+
 fn piece_letter(p: Piece, c: Color) -> char {
     let l = if p == Piece::Pawn { 'P' } else { p.letter() };
     if c == Color::White { l } else { l.to_ascii_lowercase() }
@@ -938,6 +997,26 @@ mod tests {
         assert_eq!(piece_glyph(Piece::Knight, Color::Black), '♞');
         assert_eq!(piece_letter(Piece::Pawn, Color::White), 'P');
         assert_eq!(piece_letter(Piece::Knight, Color::Black), 'n');
+    }
+
+    #[test]
+    fn the_pieces_missing_from_the_board_are_the_ones_taken() {
+        let start = Position::start();
+        assert!(lost(&start, Color::White).is_empty());
+        // White is a queen and a pawn down; Black has lost a knight.
+        let p = Position::from_fen("rnbqkb1r/pppppppp/8/8/8/8/PPPPPPP1/RNB1KBNR w KQkq - 0 1").unwrap();
+        assert_eq!(lost(&p, Color::White), [Piece::Queen, Piece::Pawn]);
+        assert_eq!(lost(&p, Color::Black), [Piece::Knight]);
+        // A pawn that became a second queen is not a queen taken.
+        let promoted = Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPP1/RNBQKBNQ w KQkq - 0 1").unwrap();
+        assert_eq!(lost(&promoted, Color::White), [Piece::Rook, Piece::Pawn]);
+    }
+
+    #[test]
+    fn taken_pieces_are_counted_the_way_players_count_them() {
+        assert_eq!(points(&[Piece::Queen, Piece::Pawn]), 10);
+        assert_eq!(points(&[Piece::Knight, Piece::Bishop, Piece::Rook]), 11);
+        assert_eq!(points(&[]), 0);
     }
 
     #[test]
