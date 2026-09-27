@@ -45,6 +45,7 @@ Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 | `L` | play on lichess, or leave it |
 | `R` | resign a lichess game |
 | `s` | write the game to `~/.gambit/game.pgn` |
+| `Ctrl+A` | talk the game over with Claude in a full session, as in every Fe₂O₃ app; not during a live lichess game, where outside help breaks the rules |
 | `?` | every key |
 | `q` | quit |
 

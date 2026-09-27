@@ -453,6 +453,7 @@ impl App {
             "o" => self.choose_opponent(),
             "s" => self.save_pgn(),
             "?" => self.help(),
+            "C-A" => self.talk_to_claude(),
             _ => {}
         }
         false
@@ -769,8 +770,8 @@ impl App {
     }
 
     /// Write the game where other chess programs can read it.
-    fn save_pgn(&mut self) {
-        let path = config::dir().join("game.pgn");
+    /// The game so far as PGN.
+    fn pgn(&self) -> String {
         let result = match self.over {
             Some(Over::Checkmate(Color::White)) => "1-0",
             Some(Over::Checkmate(Color::Black)) => "0-1",
@@ -786,11 +787,40 @@ impl App {
         }
         pgn.push_str(result);
         pgn.push('\n');
+        pgn
+    }
+
+    fn save_pgn(&mut self) {
+        let path = config::dir().join("game.pgn");
+        let pgn = self.pgn();
         let _ = std::fs::create_dir_all(config::dir());
         self.note = Some(match std::fs::write(&path, pgn) {
             Ok(()) => (format!("Game written to {}", path.display()), t::OK),
             Err(e) => (format!("Could not write the game: {e}"), t::ERR),
         });
+    }
+
+    /// Ctrl+A, as in every Fe2O3 app: a full Claude session about the
+    /// game. Not while a lichess game is on: help from outside breaks
+    /// lichess's rules.
+    fn talk_to_claude(&mut self) {
+        if self.live.is_some() && self.over.is_none() {
+            self.note = Some(("Not during a live lichess game: outside help breaks its rules".to_string(), t::ERR));
+            return;
+        }
+        let you = if self.me == Color::White { "White" } else { "Black" };
+        let ctx = format!("{}\nPosition (FEN): {}\n", self.pgn(), self.pos.to_fen());
+        let intro = format!("I am playing chess in gambit, my chess app, as {you}.");
+        let started = crust::claude_session("Gambit", &intro, &ctx);
+        Crust::clear_screen();
+        self.shown = Default::default();
+        self.header.full_refresh();
+        self.board_p.full_refresh();
+        self.side_p.full_refresh();
+        self.footer.full_refresh();
+        if !started {
+            self.note = Some(("claude is not on the PATH".to_string(), t::ERR));
+        }
     }
 
     fn help(&mut self) {
@@ -808,6 +838,7 @@ impl App {
             format!(" {:<14} play on lichess, or leave it", k("L")),
             format!(" {:<14} resign a lichess game", k("R")),
             format!(" {:<14} write the game to ~/.gambit/game.pgn", k("s")),
+            format!(" {:<14} talk the game over with Claude (not in a live lichess game)", k("Ctrl-A")),
             format!(" {:<14} quit", k("q")),
             String::new(),
             format!(" {}", style::fg("The opponent is told the position and every legal", t::DIM)),
