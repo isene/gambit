@@ -989,9 +989,10 @@ fn main() {
     if app.pos.turn != app.me { app.start_thinking(None); }
     app.render();
     loop {
-        // One second of waiting at a time: enough for the thinking clock,
-        // and nothing at all to do between keys.
-        if let Some(key) = Input::getchr(Some(1)) {
+        // A second at a time while the opponent thinks or a Lichess game
+        // runs, for the clocks. Else nothing wakes gambit but a key.
+        let busy = app.thinking.is_some() || app.live.is_some() || app.lichess_events.is_some();
+        if let Some(key) = Input::getchr(busy.then_some(1)) {
             if app.handle(&key) { break; }
         }
         app.collect_move();
