@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "fe2o3-crust"
-version = "0.1.76"
+version = "0.1.79"
 dependencies = [
  "crossterm",
  "libc",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "gambit"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "fe2o3-crust",
  "libc",

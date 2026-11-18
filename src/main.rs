@@ -149,7 +149,7 @@ impl App {
             (None, Some(id)) => format!("{} · {}", opponent::describe(&self.cfg), opponent::pretty_model(id)),
             (None, None) => opponent::describe(&self.cfg),
         };
-        let right = format!("{}  v{} ", style::fg(&who, t::OK), VERSION);
+        let right = format!("{}  {}", style::fg(&who, t::OK), crust::version_tag("gambit", VERSION));
         let pad = (self.cols as usize).saturating_sub(crust::display_width(&left) + crust::display_width(&right));
         format!("{left}{}{right}", " ".repeat(pad))
     }
